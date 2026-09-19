@@ -1,0 +1,10 @@
+# Env
+.env
+
+# Build output
+/bin/
+/design-payment-system
+*.exe
+
+# OS
+.DS_Store

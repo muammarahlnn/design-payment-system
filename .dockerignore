@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+.env.example
+*.md
+/bin/
+.agents
+.claude
+skills-lock.json
+.DS_Store
