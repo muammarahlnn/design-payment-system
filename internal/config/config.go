@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -20,10 +21,11 @@ type Options struct {
 // Load at startup and then passed down by dependency injection; nothing
 // downstream reads the environment directly.
 type Config struct {
-	App      AppConfig
-	Postgres PostgresConfig
-	Kafka    KafkaConfig
-	Gateway  GatewayConfig
+	App       AppConfig
+	Postgres  PostgresConfig
+	Kafka     KafkaConfig
+	Gateway   GatewayConfig
+	Reconcile ReconcileConfig
 }
 
 type AppConfig struct {
@@ -55,7 +57,36 @@ type KafkaConfig struct {
 // GatewayConfig points the worker at the payment gateway it charges against.
 // In this project that is the fake-gateway container.
 type GatewayConfig struct {
-	URL string
+	URL     string
+	Timeout time.Duration
+
+	// WebhookSecret signs gateway callbacks. Both sides hold it: fake-gateway
+	// signs with it, payment-service verifies with it.
+	WebhookSecret string
+	// WebhookURL is where fake-gateway delivers callbacks. Only the gateway
+	// side reads it.
+	WebhookURL string
+	// StorePath is where fake-gateway persists charges. Only the gateway
+	// side reads it.
+	StorePath string
+
+	// FailMode is a fake-gateway test hook, empty in normal use:
+	//   decline -> the gateway refuses every charge (402)
+	//   error   -> the gateway returns 500, which the worker retries
+	//   timeout -> the gateway hangs, which the client timeout cuts off
+	FailMode string
+}
+
+// ReconcileConfig tunes the reconciliation sweep in payment-worker.
+//
+// The defaults here are deliberately short so the behaviour is observable in a
+// learning setup. Production values look more like: sweep every minute, treat
+// a payment as stale after 15 minutes, expire after 24 hours.
+type ReconcileConfig struct {
+	Interval    time.Duration
+	StaleAfter  time.Duration
+	ExpireAfter time.Duration
+	BatchSize   int
 }
 
 // Load resolves configuration a single time. Precedence, highest first:
@@ -80,6 +111,15 @@ func Load(opts Options) (*Config, error) {
 	v.SetDefault("DB_SSLMODE", "disable")
 	v.SetDefault("KAFKA_BROKERS", "localhost:29092")
 	v.SetDefault("GATEWAY_URL", "http://localhost:8082")
+	v.SetDefault("GATEWAY_TIMEOUT", "5s")
+	v.SetDefault("GATEWAY_FAIL_MODE", "")
+	v.SetDefault("WEBHOOK_SECRET", "dev-webhook-secret")
+	v.SetDefault("WEBHOOK_URL", "http://localhost:8080/webhook/payment")
+	v.SetDefault("GATEWAY_STORE_PATH", "/data/charges.json")
+	v.SetDefault("RECONCILE_INTERVAL", "30s")
+	v.SetDefault("RECONCILE_STALE_AFTER", "2m")
+	v.SetDefault("RECONCILE_EXPIRE_AFTER", "30m")
+	v.SetDefault("RECONCILE_BATCH_SIZE", 100)
 
 	cfg := &Config{
 		App: AppConfig{
@@ -98,7 +138,18 @@ func Load(opts Options) (*Config, error) {
 			Brokers: splitAndTrim(v.GetString("KAFKA_BROKERS")),
 		},
 		Gateway: GatewayConfig{
-			URL: strings.TrimSpace(v.GetString("GATEWAY_URL")),
+			URL:           strings.TrimSpace(v.GetString("GATEWAY_URL")),
+			Timeout:       v.GetDuration("GATEWAY_TIMEOUT"),
+			FailMode:      strings.TrimSpace(v.GetString("GATEWAY_FAIL_MODE")),
+			WebhookSecret: strings.TrimSpace(v.GetString("WEBHOOK_SECRET")),
+			WebhookURL:    strings.TrimSpace(v.GetString("WEBHOOK_URL")),
+			StorePath:     strings.TrimSpace(v.GetString("GATEWAY_STORE_PATH")),
+		},
+		Reconcile: ReconcileConfig{
+			Interval:    v.GetDuration("RECONCILE_INTERVAL"),
+			StaleAfter:  v.GetDuration("RECONCILE_STALE_AFTER"),
+			ExpireAfter: v.GetDuration("RECONCILE_EXPIRE_AFTER"),
+			BatchSize:   v.GetInt("RECONCILE_BATCH_SIZE"),
 		},
 	}
 
@@ -117,6 +168,9 @@ func (c *Config) validate() error {
 	}
 	if len(c.Kafka.Brokers) == 0 {
 		return errors.New("KAFKA_BROKERS must list at least one broker")
+	}
+	if c.Gateway.WebhookSecret == "" {
+		return errors.New("WEBHOOK_SECRET must not be empty")
 	}
 	return nil
 }

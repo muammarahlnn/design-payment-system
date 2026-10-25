@@ -8,8 +8,21 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_NAME}
     ports:
-      # Containers reach Postgres at postgres:5432 on the Docker network;
-      # this mapping is only for psql/DBeaver from your machine.
+      # Host port 5433, container port 5432.
+      #
+      # 5432 on this machine is taken by a native PostgreSQL 18 from the EDB
+      # installer (/Library/PostgreSQL/18, started by a LaunchDaemon at boot),
+      # so publishing there would clash or connect you to the wrong server.
+      #
+      # The left side comes from .env, which holds the HOST's view of the
+      # database (localhost:5433). Containers do not use this mapping at all —
+      # they reach Postgres at postgres:5432 over the Docker network, via the
+      # DB_HOST/DB_PORT overrides in each service below.
+      #
+      # Syntax is HOST:CONTAINER. Only the LEFT number is yours to choose.
+      # The right one must stay 5432: that is the port Postgres listens on
+      # inside its own container, and changing it points the mapping at
+      # nothing.
       - "${DB_PORT}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -41,6 +54,11 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Without this, Kafka writes to its default /tmp/kafka-logs INSIDE the
+      # container's writable layer, and the kafkadata volume below is never
+      # used. Data then dies with the container, and a disk-full event
+      # corrupts it with no way back.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -78,8 +96,10 @@ services:
       - .env
     environment:
       APP_PORT: 8080
-      # .env targets a local `go run`; inside the network the hostnames differ.
+      # .env targets a local `go run` on the host, where Postgres is
+      # localhost:5433. Inside the network it is postgres:5432.
       DB_HOST: postgres
+      DB_PORT: 5432
       KAFKA_BROKERS: kafka:9092
     ports:
       - "8080:8080"
@@ -107,8 +127,14 @@ services:
     environment:
       APP_PORT: 8081
       DB_HOST: postgres
+      DB_PORT: 5432
       KAFKA_BROKERS: kafka:9092
       GATEWAY_URL: http://fake-gateway:8082
+      # Overridable from the shell so the sweep can be made fast for testing:
+      #   RECONCILE_STALE_AFTER=10s docker compose up -d payment-worker
+      RECONCILE_INTERVAL: ${RECONCILE_INTERVAL:-30s}
+      RECONCILE_STALE_AFTER: ${RECONCILE_STALE_AFTER:-2m}
+      RECONCILE_EXPIRE_AFTER: ${RECONCILE_EXPIRE_AFTER:-30m}
     ports:
       - "8081:8081"
     healthcheck:
@@ -136,6 +162,14 @@ services:
       - .env
     environment:
       APP_PORT: 8082
+      # Drive the failure knob from the shell without editing .env:
+      #   GATEWAY_FAIL_MODE=decline docker compose up -d fake-gateway
+      GATEWAY_FAIL_MODE: ${GATEWAY_FAIL_MODE:-}
+      WEBHOOK_URL: http://payment-service:8080/webhook/payment
+      GATEWAY_STORE_PATH: /data/charges.json
+    volumes:
+      # Charges must survive a restart, or reconciliation has nothing to ask.
+      - gatewaydata:/data
     ports:
       - "8082:8082"
     healthcheck:
@@ -145,6 +179,20 @@ services:
       retries: 5
       start_period: 5s
 
+  web:
+    build:
+      context: ./web
+    container_name: dps-web
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      payment-service:
+        condition: service_healthy
+      fake-gateway:
+        condition: service_healthy
+
 volumes:
+  gatewaydata:
   pgdata:
   kafkadata:

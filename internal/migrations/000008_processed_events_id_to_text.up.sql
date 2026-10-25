@@ -1,0 +1,11 @@
+-- event_id was typed UUID because the first consumer of this table was
+-- payment-worker, whose event ids are outbox row ids.
+--
+-- That baked one consumer's id format into a table whose whole purpose is to
+-- be shared — its key is (consumer, event_id) precisely so several consumers
+-- can use it. The webhook consumer's ids come from the payment provider and
+-- look like "evt_3f2a...", which a UUID column rejects outright.
+--
+-- TEXT holds every id format, including UUIDs. The lesson: a generic table
+-- should not take its column types from its first caller.
+ALTER TABLE processed_events ALTER COLUMN event_id TYPE TEXT;

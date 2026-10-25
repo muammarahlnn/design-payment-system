@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payment System Playground</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Mulish:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link href="https://api.fontshare.com/v2/css?f[]=chillax@600,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="mark">B</div>
+  <div>
+    <h1>Payment System Playground</h1>
+    <div class="sub">design-payment-system &middot; outbox &rarr; Kafka &rarr; worker &rarr; gateway &rarr; webhook</div>
+  </div>
+  <div class="spacer"></div>
+  <div class="health" id="health"></div>
+</header>
+
+<div class="wrap">
+
+  <!-- pipeline -->
+  <div class="card" style="margin-bottom:20px">
+    <header>
+      <h2>The flow</h2>
+      <span class="hint">pick a payment below to light up where it is</span>
+    </header>
+    <div class="body">
+      <div class="pipe" id="pipe"></div>
+    </div>
+  </div>
+
+  <div class="grid">
+
+    <!-- left column -->
+    <div class="stack">
+
+      <div class="card">
+        <header><h2>Create a payment</h2></header>
+        <div class="body">
+          <div class="field">
+            <label for="customer">Customer</label>
+            <input id="customer" value="cust_demo">
+          </div>
+          <div class="field">
+            <label for="amount">Amount (whole rupiah)</label>
+            <input id="amount" type="number" value="275000" min="1">
+            <div class="note" id="amountHint"></div>
+          </div>
+          <div class="field">
+            <label for="method">Method</label>
+            <select id="method">
+              <option value="va_bca">Virtual Account &mdash; BCA</option>
+              <option value="va_bni">Virtual Account &mdash; BNI</option>
+              <option value="qris">QRIS</option>
+              <option value="card">Card</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="idem">Idempotency key</label>
+            <div class="row">
+              <input id="idem" class="mono">
+              <button class="ghost small" style="flex:none" id="newKey">New</button>
+            </div>
+            <div class="note">Send the same key twice &rarr; one payment, HTTP 200 instead of 201.</div>
+          </div>
+          <div class="field">
+            <button class="wide" id="create">Create payment</button>
+          </div>
+          <div id="createOut"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <header>
+          <h2>Gateway behaviour</h2>
+          <span class="hint">applies to the next charge</span>
+        </header>
+        <div class="body">
+          <div class="field">
+            <label for="failMode">Fail mode</label>
+            <select id="failMode">
+              <option value="">Normal &mdash; accept the charge</option>
+              <option value="decline">Decline &mdash; 402, payment FAILED</option>
+              <option value="error">Error &mdash; 500, retried then UNKNOWN</option>
+              <option value="timeout">Timeout &mdash; no answer, UNKNOWN</option>
+            </select>
+          </div>
+          <div class="explain" id="modeExplain"></div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- right column -->
+    <div class="stack">
+
+      <div class="card">
+        <header>
+          <h2>Payments</h2>
+          <span class="hint" id="liveHint">refreshing every 2s</span>
+          <div class="spacer"></div>
+          <button class="ghost small" id="refresh">Refresh</button>
+        </header>
+        <div class="body"><div class="counts" id="counts"></div></div>
+        <div style="overflow-x:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th><th>Amount</th><th>Method</th>
+                <th>Customer</th><th>Created</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <div class="empty" id="empty" hidden>No payments yet. Create one on the left.</div>
+      </div>
+
+      <div class="card" id="detailCard" hidden>
+        <header>
+          <h2>Payment detail</h2>
+          <span class="hint mono" id="detailId"></span>
+          <div class="spacer"></div>
+          <button class="ghost small" id="closeDetail">Close</button>
+        </header>
+        <div class="body stack" id="detailBody"></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

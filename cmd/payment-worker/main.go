@@ -1,19 +1,24 @@
-// Command payment-worker consumes payment events from Kafka and (once
-// implemented) charges them against the payment gateway, writing the outcome
-// back to Postgres.
+// Command payment-worker consumes payment.created from Kafka, submits each
+// payment to the gateway, and moves it out of PENDING.
 //
-// Scaffolding only for now: config, infrastructure clients, and /health. The
-// HTTP server exists purely so the worker exposes a health endpoint — it
+// The HTTP server exists purely so the worker exposes a health endpoint — it
 // serves no business traffic.
 package main
 
 import (
+	"context"
 	"log"
 
+	"github.com/twmb/franz-go/pkg/kgo"
+
 	"github.com/muammarahlnn/design-payment-system/internal/config"
+	"github.com/muammarahlnn/design-payment-system/internal/event"
+	"github.com/muammarahlnn/design-payment-system/internal/gateway"
 	"github.com/muammarahlnn/design-payment-system/internal/health"
+	"github.com/muammarahlnn/design-payment-system/internal/inbox"
 	"github.com/muammarahlnn/design-payment-system/internal/infra/kafka"
 	"github.com/muammarahlnn/design-payment-system/internal/infra/postgres"
+	"github.com/muammarahlnn/design-payment-system/internal/payment"
 	"github.com/muammarahlnn/design-payment-system/internal/server"
 )
 
@@ -32,17 +37,58 @@ func main() {
 	}
 	defer db.Close()
 
-	// A plain client for now. The consumer group and topic subscription get
-	// added with the consumer itself, once the event stream exists.
-	kafkaClient, err := kafka.New(cfg.Kafka)
+	kafkaClient, err := kafka.New(cfg.Kafka,
+		kgo.ConsumerGroup(payment.ConsumerName),
+		kgo.ConsumeTopics(event.TopicPaymentCreated),
+	)
 	if err != nil {
 		log.Fatalf("init kafka: %v", err)
 	}
 	defer kafkaClient.Close()
 
-	// TODO: consume the payment event topic, charge cfg.Gateway.URL, persist
-	// the result, and handle retries + DLQ.
-	log.Printf("%s: gateway configured at %s", cfg.App.Name, cfg.Gateway.URL)
+	if err := postgres.Migrate(db); err != nil {
+		log.Fatalf("migrate database: %v", err)
+	}
+
+	// The DLQ is not automatic — the consumer produces to it, so it must exist.
+	if err := kafka.EnsureTopic(context.Background(), kafkaClient, event.TopicPaymentCreatedDLQ, 1, 1); err != nil {
+		log.Fatalf("ensure dlq topic: %v", err)
+	}
+
+	log.Printf("%s: gateway at %s (timeout %s)", cfg.App.Name, cfg.Gateway.URL, cfg.Gateway.Timeout)
+
+	// Wire the consumer: gateway client + repositories -> processor -> consumer.
+	consumer := payment.NewConsumer(
+		kafkaClient,
+		kafka.NewProducer(kafkaClient),
+		payment.NewProcessor(
+			db,
+			payment.NewRepository(db),
+			inbox.NewRepository(db),
+			gateway.New(cfg.Gateway.URL, cfg.Gateway.Timeout),
+		),
+	)
+	go consumer.Run(context.Background())
+
+	// Reconciliation is the backstop. Every other path here is event-driven,
+	// and event-driven systems lose events: a callback that never arrives, a
+	// crash between charging and committing, a gateway that times out. This
+	// loop depends on nothing being delivered — it polls our own database and
+	// asks the provider directly.
+	gatewayClient := gateway.New(cfg.Gateway.URL, cfg.Gateway.Timeout)
+	reconciler := payment.NewReconciler(
+		db,
+		payment.NewRepository(db),
+		inbox.NewRepository(db),
+		gatewayClient,
+		payment.ReconcilerConfig{
+			Interval:    cfg.Reconcile.Interval,
+			StaleAfter:  cfg.Reconcile.StaleAfter,
+			ExpireAfter: cfg.Reconcile.ExpireAfter,
+			BatchSize:   cfg.Reconcile.BatchSize,
+		},
+	)
+	go reconciler.Run(context.Background())
 
 	healthHandler := health.NewHandler(
 		health.NewService(
