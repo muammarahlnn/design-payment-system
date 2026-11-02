@@ -8,3 +8,7 @@
 
 # OS
 .DS_Store
+
+# Frontend build artefacts
+web/node_modules/
+web/dist/
